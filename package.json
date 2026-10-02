@@ -1,0 +1,47 @@
+{
+	"name": "@frapetti-dev/pi-secret",
+	"version": "0.1.0",
+	"description": "omp extension: ask the user for a secret through a masked prompt and hand the agent only a file path",
+	"author": "frapetti-dev (https://github.com/frapetti-dev)",
+	"type": "module",
+	"files": [
+		"src",
+		"README.md",
+		"LICENSE"
+	],
+	"keywords": [
+		"omp",
+		"oh-my-pi",
+		"omp-extension",
+		"extension",
+		"secrets",
+		"security",
+		"ai-agent"
+	],
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/frapetti-dev/pi-secret.git"
+	},
+	"homepage": "https://github.com/frapetti-dev/pi-secret#readme",
+	"bugs": "https://github.com/frapetti-dev/pi-secret/issues",
+	"license": "MIT",
+	"publishConfig": {
+		"registry": "https://npm.pkg.github.com"
+	},
+	"omp": {
+		"extensions": [
+			"./src/index.ts"
+		]
+	},
+	"scripts": {
+		"typecheck": "tsc --noEmit -p tsconfig.json",
+		"test": "bun test"
+	},
+	"devDependencies": {
+		"@oh-my-pi/pi-coding-agent": "18.4.10",
+		"@oh-my-pi/pi-tui": "18.4.10",
+		"@types/bun": "^1.4.2",
+		"@types/node": "^26.6.4",
+		"typescript": "^7.0.2"
+	}
+}
