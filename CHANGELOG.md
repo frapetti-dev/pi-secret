@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Secret tiers scoped to a project (git root of the cwd): **ephemeral** (memory only, shared with subagents, cleared when the main session closes) and **persistent** (AES-256-GCM vault at `~/.omp/agent/pi-secret/vault.json`; key from Windows Hello on Windows, OS keyring via `Bun.secrets` elsewhere, unlocked once per process).
+- `ask_secret` takes several secrets per call, with a per-entry `persistent` suggestion the user can flip with Tab.
+- `import_secret`: create a secret from a command, file, HTTP response (with `secret_headers` from other secrets) or env var, with optional JSON-path/regex extraction.
+- `show_secrets`: overlay with Show/Hide/Copy for the user.
+- `/secrets` manager command (native Tern picker with ANSI twin).
+- `bash` is re-registered with `secrets` (env) and `secret_files` (temp file) bindings.
+- Redaction of secret values (`[secret:<name>]`) in tool results and in everything sent to the model.
+- pi-verdict integration: on `pi-verdict:collect`, contribute `ask_secret`, `list_secrets`, `secret_length`, `secret_size`, `secret_hash`, `delete_secret` and `show_secrets` as always allowed, so they skip the classifier without manual `tools` config. `bash` and `import_secret` stay gated.
+
+### Changed
+
+- `ask_secret` no longer returns a file path; secrets are used through `bash` bindings.
+- Secret tools take their value from the store of the current project.
+
+### Removed
+
+- The temp-file store, `get_secret_path` and the `read`/`grep` `tool_call` guard.
+
+### Fixed
+
+- `import_secret` needs `exec` approval (like `bash`) for `command` sources and for `http` sources with `secret_headers`; other sources stay at `write`.
+
 ## [0.1.0] - 2026-10-02
 
 ### Added
