@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { extractValue, readSource } from "../src/import";
+import { extractValue, importApproval, importSecret, readSource } from "../src/import";
+import { createStore } from "../src/store";
 import { findBash, useTmp } from "./helpers";
 
 const tmp = useTmp();
@@ -85,5 +86,50 @@ describe("readSource", () => {
 				"Only http(s) URLs are supported.",
 			);
 		});
+	});
+});
+
+describe("importApproval", () => {
+	test("command sources need exec", () => {
+		expect(importApproval({ source: { type: "command", command: "x" } })).toEqual({ tier: "exec", reason: "runs a shell command" });
+	});
+	test("http with secret_headers needs exec", () => {
+		const args = { source: { type: "http", url: "u", secret_headers: { A: { secret: "t" } } } };
+		expect(importApproval(args)).toEqual({ tier: "exec", reason: "sends stored secrets to a URL" });
+	});
+	test("everything else is write", () => {
+		expect(importApproval({ source: { type: "http", url: "u", secret_headers: {} } })).toBe("write");
+		expect(importApproval({ source: { type: "file", path: "f" } })).toBe("write");
+		expect(importApproval({ source: { type: "env", variable: "V" } })).toBe("write");
+		expect(importApproval(undefined)).toBe("write");
+	});
+});
+
+describe("importSecret", () => {
+	const secrets = () =>
+		createStore({
+			vaultPath: path.join(tmp.dir(), "vault.json"),
+			keyProvider: { id: "keyring", rawKey: async () => Buffer.alloc(32, 7) },
+		}).forProject(tmp.dir());
+	const o = () => ({ cwd: tmp.dir(), shell: { shell: "bash", args: ["-c"], env: {} } });
+
+	test("stores an env source and reports tier and length", async () => {
+		process.env.PI_SECRET_TEST_DUMMY = "  dummy-env-1234\n";
+		try {
+			const s = secrets();
+			const source = { type: "env" as const, variable: "PI_SECRET_TEST_DUMMY" };
+			expect(await importSecret(s, { name: "e", source }, o())).toEqual({ tier: "ephemeral", length: 14 });
+			expect(await s.get("e")).toBe("dummy-env-1234");
+			expect((await importSecret(s, { name: "e", persistent: true, source }, o())).tier).toBe("persistent");
+		} finally {
+			delete process.env.PI_SECRET_TEST_DUMMY;
+		}
+	});
+
+	test("rejects an invalid name before reading the source", async () => {
+		const s = secrets();
+		const source = { type: "file" as const, path: path.join(tmp.dir(), "missing") };
+		await expect(importSecret(s, { name: "../x", source }, o())).rejects.toThrow("Invalid secret name");
+		expect(s.list()).toEqual([]);
 	});
 });

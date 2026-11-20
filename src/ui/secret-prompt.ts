@@ -1,6 +1,7 @@
 import type { ExtensionContext, Theme } from "@oh-my-pi/pi-coding-agent";
 import { type DescribeContext, type FormFieldTheme, type NativeNode, TextFormField } from "@oh-my-pi/pi-tui";
 import { Memo, n, prose } from "./nodes";
+import type { ProjectSecrets, Tier } from "../store";
 
 /**
  * Masked single-field prompt: the typed value is rendered as bullets and never echoed.
@@ -48,7 +49,7 @@ export interface Entered {
 }
 
 /** One dialog, entries asked one at a time; Tab flips the entry's tier. Esc cancels the current and all remaining entries. */
-export async function askSecrets(
+async function askSecrets(
 	ctx: ExtensionContext,
 	entries: AskEntry[],
 	signal?: AbortSignal,
@@ -123,4 +124,32 @@ export async function askSecrets(
 		// Dialog rejection/abort: everything not yet entered counts as cancelled.
 	}
 	return settle();
+}
+
+export interface Captured {
+	name: string;
+	status: "stored" | "cancelled" | "failed";
+	tier?: Tier;
+	/** Store error message (never contains the value). */
+	error?: string;
+}
+
+/** Prompt for `entries`, then store each entered value in its chosen tier. Store failures are reported per entry, never thrown. */
+export async function captureSecrets(
+	ctx: ExtensionContext,
+	secrets: ProjectSecrets,
+	entries: AskEntry[],
+	signal?: AbortSignal,
+): Promise<Captured[]> {
+	const { entered, cancelled } = await askSecrets(ctx, entries, signal);
+	const results: Captured[] = [];
+	for (const e of entered) {
+		try {
+			results.push({ name: e.name, status: "stored", tier: await secrets.set(e.name, e.value, e.persistent ? "persistent" : "ephemeral") });
+		} catch (err) {
+			results.push({ name: e.name, status: "failed", error: err instanceof Error ? err.message : String(err) });
+		}
+	}
+	for (const name of cancelled) results.push({ name, status: "cancelled" });
+	return results;
 }

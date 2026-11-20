@@ -1,10 +1,8 @@
-import * as fs from "node:fs";
 import type { ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
 import { getShellConfig, isCmdShell, isPowerShell } from "@oh-my-pi/pi-utils/procmgr";
-import { type Extract, extractValue, readSource, type ImportSource } from "./import";
-import { buildBoundCommand, ENV_NAME_RE } from "./inject";
+import { type Extract, type ImportSource, importApproval, importSecret } from "./import";
+import { type Bound, createBinder } from "./binding";
 import { platformKeyProvider } from "./keys";
-import { projectKey } from "./project";
 import { createRedactor, redactDeep } from "./redact";
 import {
 	createStore,
@@ -17,11 +15,11 @@ import {
 } from "./store";
 import { pickSecret } from "./ui/manager";
 import { showSecrets } from "./ui/reveal";
-import { askSecrets } from "./ui/secret-prompt";
+import { captureSecrets } from "./ui/secret-prompt";
 
 // Module scope on purpose: ephemeral secrets are shared with subagents (one store per omp process).
 const store = createStore({ vaultPath: defaultVaultPath(), keyProvider: platformKeyProvider() });
-const tempDirs = new Set<string>();
+const binder = createBinder();
 
 function text(value: string, details?: unknown) {
 	return { content: [{ type: "text" as const, text: value }], ...(details === undefined ? {} : { details }) };
@@ -35,19 +33,14 @@ function message(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
 }
 
-/** Validate `name`, then run `fn`; store errors become tool errors. Secret values never pass through here. */
-async function guarded(name: string, fn: () => Promise<ReturnType<typeof text>>) {
-	const invalid = validateName(name);
-	if (invalid) return fail(invalid);
+/** Run `fn`; store errors (invalid name, not found) become tool errors. Secret values never pass through here. */
+async function guarded(fn: () => Promise<ReturnType<typeof text>>) {
 	try {
 		return await fn();
 	} catch (err) {
 		return fail(message(err));
 	}
 }
-
-const tierOfFlag = (persistent: boolean | undefined): Tier | undefined =>
-	persistent === undefined ? undefined : persistent ? "persistent" : "ephemeral";
 
 export default function piSecret(pi: ExtensionAPI) {
 	const z = pi.zod;
@@ -94,28 +87,19 @@ export default function piSecret(pi: ExtensionAPI) {
 			if (ctx.mode !== "tui") {
 				return fail(`ask_secret needs the interactive TUI for masked input (current mode: ${ctx.mode}).`);
 			}
-			const project = projectKey(ctx.cwd);
-			const { entered, cancelled } = await askSecrets(
+			const results = await captureSecrets(
 				ctx,
+				store.forProject(ctx.cwd),
 				secrets.map(s => ({ name: s.name, prompt: s.prompt, persistent: s.persistent ?? false })),
 				signal,
 			);
-			const results: { name: string; status: "stored" | "cancelled" | "failed"; tier?: Tier }[] = [];
-			const lines: string[] = [];
-			for (const e of entered) {
-				try {
-					const tier = await store.set(project, e.name, e.value, e.persistent ? "persistent" : "ephemeral");
-					results.push({ name: e.name, status: "stored", tier });
-					lines.push(`${e.name}: stored (${tier})`);
-				} catch (err) {
-					results.push({ name: e.name, status: "failed" });
-					lines.push(`${e.name}: failed: ${message(err)}`);
-				}
-			}
-			for (const name of cancelled) {
-				results.push({ name, status: "cancelled" });
-				lines.push(`${name}: cancelled`);
-			}
+			const lines = results.map(r =>
+				r.status === "stored"
+					? `${r.name}: stored (${r.tier})`
+					: r.status === "failed"
+						? `${r.name}: failed: ${r.error}`
+						: `${r.name}: cancelled`,
+			);
 			lines.push('Use them through bash with secrets: {ENV_VAR: "<name>"}.');
 			const body = text(lines.join("\n"), { results });
 			return results.some(r => r.status === "stored") ? body : { ...body, isError: true };
@@ -129,7 +113,7 @@ export default function piSecret(pi: ExtensionAPI) {
 		description: "List the names and tiers (ephemeral/persistent) of this project's stored secrets, never their values.",
 		parameters: z.object({}),
 		async execute(_id, _params, _signal, _onUpdate, ctx) {
-			const secrets = store.list(projectKey(ctx.cwd));
+			const secrets = store.forProject(ctx.cwd).list();
 			if (secrets.length === 0) return text("No secrets stored for this project.", { secrets });
 			return text(secrets.map(s => `${s.name}\t${s.tier}`).join("\n"), { secrets });
 		},
@@ -142,8 +126,8 @@ export default function piSecret(pi: ExtensionAPI) {
 		description: "Length of a stored secret in characters (Unicode code points), without revealing it.",
 		parameters: nameOnly,
 		async execute(_id, { name }, _signal, _onUpdate, ctx) {
-			return guarded(name, async () => {
-				const value = await store.get(projectKey(ctx.cwd), name);
+			return guarded(async () => {
+				const value = await store.forProject(ctx.cwd).get(name);
 				return text(`Secret "${name}" length: ${secretLength(value)} characters (Unicode code points).`);
 			});
 		},
@@ -156,8 +140,8 @@ export default function piSecret(pi: ExtensionAPI) {
 		description: "Size of a stored secret in bytes (UTF-8), without revealing it.",
 		parameters: nameOnly,
 		async execute(_id, { name }, _signal, _onUpdate, ctx) {
-			return guarded(name, async () => {
-				const value = await store.get(projectKey(ctx.cwd), name);
+			return guarded(async () => {
+				const value = await store.forProject(ctx.cwd).get(name);
 				return text(`Secret "${name}" size: ${Buffer.byteLength(value, "utf8")} bytes (UTF-8).`);
 			});
 		},
@@ -174,9 +158,9 @@ export default function piSecret(pi: ExtensionAPI) {
 			algorithm: z.enum(["sha256", "sha512", "sha1", "md5"]).optional().describe("Hash algorithm, default sha256"),
 		}),
 		async execute(_id, { name, algorithm }, _signal, _onUpdate, ctx) {
-			return guarded(name, async () => {
+			return guarded(async () => {
 				const algo: HashAlgorithm = algorithm ?? "sha256";
-				const value = await store.get(projectKey(ctx.cwd), name);
+				const value = await store.forProject(ctx.cwd).get(name);
 				return text(`Secret "${name}" ${algo}: ${secretHash(value, algo)}`);
 			});
 		},
@@ -189,8 +173,8 @@ export default function piSecret(pi: ExtensionAPI) {
 		description: "Delete a stored secret (either tier).",
 		parameters: nameOnly,
 		async execute(_id, { name }, _signal, _onUpdate, ctx) {
-			return guarded(name, async () => {
-				store.delete(projectKey(ctx.cwd), name);
+			return guarded(async () => {
+				store.forProject(ctx.cwd).delete(name);
 				return text(`Secret "${name}" deleted.`);
 			});
 		},
@@ -204,18 +188,14 @@ export default function piSecret(pi: ExtensionAPI) {
 			"Show secret values to the USER in an overlay (Show/Hide/Copy per secret). The values are not shared with you; the tool returns when the user closes the dialog.",
 		parameters: z.object({ names: z.array(nameParam).min(1) }),
 		async execute(_id, { names }: { names: string[] }, _signal, _onUpdate, ctx) {
-			for (const name of names) {
-				const invalid = validateName(name);
-				if (invalid) return fail(invalid);
-			}
 			if (ctx.mode !== "tui") return fail("show_secrets needs the interactive TUI.");
-			const project = projectKey(ctx.cwd);
-			const missing = names.filter(n => store.tierOf(project, n) === undefined);
-			if (missing.length > 0) return fail(`Secret(s) not found: ${missing.join(", ")}.`);
+			const secrets = store.forProject(ctx.cwd);
 			try {
+				const missing = names.filter(n => secrets.tierOf(n) === undefined);
+				if (missing.length > 0) return fail(`Secret(s) not found: ${missing.join(", ")}.`);
 				const items = [];
 				for (const name of names) {
-					items.push({ name, tier: store.tierOf(project, name)!, value: await store.get(project, name) });
+					items.push({ name, tier: secrets.tierOf(name)!, value: await secrets.get(name) });
 				}
 				await showSecrets(ctx, items);
 			} catch (err) {
@@ -250,15 +230,7 @@ export default function piSecret(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "import_secret",
 		label: "Import Secret",
-		// Commands run arbitrary code and secret_headers send stored secrets to a model-chosen URL: both need the exec tier, like bash.
-		approval: (args: unknown) => {
-			const source = (args as { source?: { type?: string; secret_headers?: Record<string, unknown> } } | undefined)?.source;
-			if (source?.type === "command") return { tier: "exec", reason: "runs a shell command" };
-			if (source?.type === "http" && source.secret_headers && Object.keys(source.secret_headers).length > 0) {
-				return { tier: "exec", reason: "sends stored secrets to a URL" };
-			}
-			return "write";
-		},
+		approval: importApproval,
 		description: [
 			"Create a secret from an automatic source without its value passing through you: a command's stdout, a file, an HTTP response or an environment variable.",
 			"Optional `extract` pulls a value out of the source (`json`: dot path, numeric segments index arrays; `regex`: group 1 or the whole match); the result is trimmed unless `trim` is false.",
@@ -267,18 +239,14 @@ export default function piSecret(pi: ExtensionAPI) {
 		].join(" "),
 		parameters: importParams,
 		async execute(_id, { name, persistent, source, extract, trim }: (typeof importParams)["_output"], signal, _onUpdate, ctx) {
-			return guarded(name, async () => {
-				const project = projectKey(ctx.cwd);
+			return guarded(async () => {
 				const shell = getShellConfig();
-				const raw = await readSource(source as ImportSource, {
-					cwd: ctx.cwd,
-					signal,
-					shell: { shell: shell.shell, args: shell.args, env: shell.env },
-					resolveSecret: n => store.get(project, n),
-				});
-				const value = extractValue(raw, extract as Extract | undefined, trim ?? true);
-				const tier = await store.set(project, name, value, tierOfFlag(persistent));
-				return text(`Imported secret "${name}" (${tier}, ${secretLength(value)} characters).`);
+				const { tier, length } = await importSecret(
+					store.forProject(ctx.cwd),
+					{ name, persistent, source: source as ImportSource, extract: extract as Extract | undefined, trim },
+					{ cwd: ctx.cwd, signal, shell: { shell: shell.shell, args: shell.args, env: shell.env } },
+				);
+				return text(`Imported secret "${name}" (${tier}, ${length} characters).`);
 			});
 		},
 	});
@@ -329,32 +297,21 @@ export default function piSecret(pi: ExtensionAPI) {
 			const invoke = (args: Record<string, unknown>) => ctx.invokeTool!(args, { signal, onUpdate: onUpdate as never });
 			if (Object.keys(secrets).length === 0 && Object.keys(files).length === 0) return invoke(rest);
 
-			for (const [envVar, name] of [...Object.entries(secrets), ...Object.entries(files)]) {
-				if (!ENV_NAME_RE.test(envVar)) return fail(`Invalid environment variable name "${envVar}".`);
-				const invalid = validateName(name);
-				if (invalid) return fail(invalid);
-			}
 			const shell = getShellConfig().shell;
 			if (isCmdShell(shell) || isPowerShell(shell)) return fail("Secret bindings need a POSIX shell (bash/sh/zsh).");
 
-			const project = projectKey(ctx.cwd);
-			let bound: ReturnType<typeof buildBoundCommand>;
+			const projectSecrets = store.forProject(ctx.cwd);
+			let bound: Bound;
 			try {
-				const resolve = async (map: Record<string, string>) =>
-					Object.fromEntries(await Promise.all(Object.entries(map).map(async ([v, n]) => [v, await store.get(project, n)])));
-				bound = buildBoundCommand(rest.command, await resolve(secrets), await resolve(files));
+				bound = await binder.bind(rest.command, { env: secrets, files }, n => projectSecrets.get(n));
 			} catch (err) {
 				return fail(message(err));
 			}
-			if (bound.tempDir) tempDirs.add(bound.tempDir);
 			try {
 				return await invoke({ ...rest, command: bound.command });
 			} finally {
 				// Async jobs outlive this call: they rely on the shell trap plus shutdown cleanup.
-				if (bound.tempDir && !rest.async) {
-					fs.rmSync(bound.tempDir, { recursive: true, force: true });
-					tempDirs.delete(bound.tempDir);
-				}
+				if (!rest.async) bound.release();
 			}
 		},
 	});
@@ -387,18 +344,17 @@ export default function piSecret(pi: ExtensionAPI) {
 	pi.on("session_shutdown", (_e, ctx) => {
 		if (ctx.agent.kind !== "main") return;
 		store.clearEphemeral();
-		for (const d of tempDirs) fs.rmSync(d, { recursive: true, force: true });
-		tempDirs.clear();
+		binder.releaseAll();
 	});
 
 	pi.registerCommand("secrets", {
 		description: "Manage this project's secrets (add, show, edit, rename, toggle persistence, delete)",
 		handler: async (_args: string, ctx: ExtensionCommandContext) => {
 			if (ctx.mode !== "tui") return ctx.ui.notify("/secrets needs the interactive TUI.", "error");
-			const project = projectKey(ctx.cwd);
+			const secrets = store.forProject(ctx.cwd);
 			let last: string | undefined;
 			for (;;) {
-				const choice = await pickSecret(ctx, project, store.list(project), last);
+				const choice = await pickSecret(ctx, secrets.project, secrets.list(), last);
 				if (!choice || choice.act === "close") return;
 				const { act, name } = choice;
 				last = name ?? last;
@@ -406,42 +362,32 @@ export default function piSecret(pi: ExtensionAPI) {
 					if (act === "add") {
 						const entered = (await ctx.ui.input("New secret name"))?.trim();
 						if (!entered) continue;
-						const invalid = validateName(entered);
-						if (invalid) {
-							ctx.ui.notify(invalid, "error");
-							continue;
-						}
-						const existing = store.tierOf(project, entered);
+						const existing = secrets.tierOf(entered);
 						if (existing && !(await ctx.ui.confirm("Overwrite secret?", `"${entered}" already exists (${existing}).`))) continue;
-						const { entered: got } = await askSecrets(ctx, [{ name: entered, persistent: existing === "persistent" }]);
-						if (got[0]) await store.set(project, entered, got[0].value, got[0].persistent ? "persistent" : "ephemeral");
+						const [r] = await captureSecrets(ctx, secrets, [{ name: entered, persistent: existing === "persistent" }]);
+						if (r?.status === "failed") ctx.ui.notify(r.error ?? "Storing the secret failed.", "error");
 						last = entered;
 						continue;
 					}
 					if (name === undefined) continue;
-					const tier = store.tierOf(project, name);
+					const tier = secrets.tierOf(name);
 					if (!tier) throw new Error(`Secret "${name}" not found.`);
 					if (act === "show") {
-						await showSecrets(ctx, [{ name, tier, value: await store.get(project, name) }]);
+						await showSecrets(ctx, [{ name, tier, value: await secrets.get(name) }]);
 					} else if (act === "edit") {
-						const { entered: got } = await askSecrets(ctx, [{ name, persistent: tier === "persistent" }]);
-						if (got[0]) await store.set(project, name, got[0].value, got[0].persistent ? "persistent" : "ephemeral");
+						const [r] = await captureSecrets(ctx, secrets, [{ name, persistent: tier === "persistent" }]);
+						if (r?.status === "failed") ctx.ui.notify(r.error ?? "Storing the secret failed.", "error");
 					} else if (act === "rename") {
 						const to = (await ctx.ui.input(`Rename "${name}" to`, name))?.trim();
 						if (!to || to === name) continue;
-						const invalid = validateName(to);
-						if (invalid) {
-							ctx.ui.notify(invalid, "error");
-							continue;
-						}
-						await store.rename(project, name, to);
+						await secrets.rename(name, to);
 						last = to;
 					} else if (act === "tier") {
 						const next: Tier = tier === "persistent" ? "ephemeral" : "persistent";
-						await store.setTier(project, name, next);
+						await secrets.setTier(name, next);
 						ctx.ui.notify(`"${name}" is now ${next}.`, "info");
 					} else if (act === "delete") {
-						if (await ctx.ui.confirm("Delete secret?", `"${name}" (${tier}) will be removed.`)) store.delete(project, name);
+						if (await ctx.ui.confirm("Delete secret?", `"${name}" (${tier}) will be removed.`)) secrets.delete(name);
 					}
 				} catch (err) {
 					ctx.ui.notify(message(err), "error");
