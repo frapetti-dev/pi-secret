@@ -1,7 +1,7 @@
 {
 	"name": "@frapetti-dev/pi-secret",
-	"version": "0.1.0",
-	"description": "omp extension: ask the user for a secret through a masked prompt and hand the agent only a file path",
+	"version": "1.0.0",
+	"description": "omp extension: hand secrets to the agent without the value entering the model context (project-scoped ephemeral and encrypted persistent tiers, used through bash bindings)",
 	"author": "frapetti-dev (https://github.com/frapetti-dev)",
 	"type": "module",
 	"files": [

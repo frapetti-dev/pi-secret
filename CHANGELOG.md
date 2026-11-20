@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-20
+
 ### Added
 
 - Secret tiers scoped to a project (git root of the cwd): **ephemeral** (memory only, shared with subagents, cleared when the main session closes) and **persistent** (AES-256-GCM vault at `~/.omp/agent/pi-secret/vault.json`; key from Windows Hello on Windows, OS keyring via `Bun.secrets` elsewhere, unlocked once per process).
