@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `ask_secret` no longer returns a file path; secrets are used through `bash` bindings.
 - Secret tools take their value from the store of the current project.
+- `ask_secret` details now carry the store error of a failed entry.
 
 ### Removed
 

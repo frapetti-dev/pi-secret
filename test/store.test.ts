@@ -2,91 +2,106 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { KeyProvider } from "../src/keys";
-import { createStore, secretHash, secretLength, validateName } from "../src/store";
+import { createStore, type SecretStore, secretHash, secretLength, validateName } from "../src/store";
 import { useTmp } from "./helpers";
 
 const tmp = useTmp();
 const provider = (fill = 7): KeyProvider => ({ id: "keyring", rawKey: async () => Buffer.alloc(32, fill) });
 const open = (fill = 7) => createStore({ vaultPath: path.join(tmp.dir(), "vault.json"), keyProvider: provider(fill) });
+const at = (s: SecretStore, dir = "p") => s.forProject(path.join(tmp.dir(), dir));
 
 describe("ephemeral tier", () => {
 	test("set/get/list/delete", async () => {
-		const s = open();
-		expect(await s.set("p", "a", "dummy-1234")).toBe("ephemeral");
-		expect(await s.get("p", "a")).toBe("dummy-1234");
-		expect(s.list("p")).toEqual([{ name: "a", tier: "ephemeral" }]);
-		s.delete("p", "a");
-		await expect(s.get("p", "a")).rejects.toThrow('Secret "a" not found');
-		expect(() => s.delete("p", "a")).toThrow("not found");
+		const s = at(open());
+		expect(await s.set("a", "dummy-1234")).toBe("ephemeral");
+		expect(await s.get("a")).toBe("dummy-1234");
+		expect(s.list()).toEqual([{ name: "a", tier: "ephemeral" }]);
+		s.delete("a");
+		await expect(s.get("a")).rejects.toThrow('Secret "a" not found');
+		expect(() => s.delete("a")).toThrow("not found");
 	});
 
 	test("projects are isolated", async () => {
 		const s = open();
-		await s.set("p1", "a", "dummy-1111");
-		await s.set("p2", "a", "dummy-2222");
-		expect(await s.get("p1", "a")).toBe("dummy-1111");
-		expect(await s.get("p2", "a")).toBe("dummy-2222");
+		await at(s, "p1").set("a", "dummy-1111");
+		await at(s, "p2").set("a", "dummy-2222");
+		expect(await at(s, "p1").get("a")).toBe("dummy-1111");
+		expect(await at(s, "p2").get("a")).toBe("dummy-2222");
+	});
+
+	test("a subdirectory of a git repo shares the repo's Project", async () => {
+		fs.mkdirSync(path.join(tmp.dir(), "repo", ".git"), { recursive: true });
+		fs.mkdirSync(path.join(tmp.dir(), "repo", "sub"));
+		const s = open();
+		await at(s, "repo/sub").set("a", "dummy-1234");
+		expect(await at(s, "repo").get("a")).toBe("dummy-1234");
+		expect(at(s, "other").tierOf("a")).toBeUndefined();
+	});
+
+	test("invalid names are rejected by the view", () => {
+		expect(() => at(open()).tierOf("../x")).toThrow("Invalid secret name");
 	});
 });
 
 describe("persistent tier", () => {
 	test("encrypted at rest, readable by a new store, ephemeral gone", async () => {
-		const s = open();
-		await s.set("p", "p1", "dummy-persist-9876", "persistent");
-		await s.set("p", "e1", "dummy-eph-5555");
+		const s = at(open());
+		await s.set("p1", "dummy-persist-9876", "persistent");
+		await s.set("e1", "dummy-eph-5555");
 		const file = fs.readFileSync(path.join(tmp.dir(), "vault.json"), "utf8");
 		expect(file.includes("dummy-persist-9876")).toBe(false);
-		const again = open();
-		expect(await again.get("p", "p1")).toBe("dummy-persist-9876");
-		expect(again.list("p")).toEqual([{ name: "p1", tier: "persistent" }]);
+		const again = at(open());
+		expect(await again.get("p1")).toBe("dummy-persist-9876");
+		expect(again.list()).toEqual([{ name: "p1", tier: "persistent" }]);
 	});
 
 	test("setTier moves both ways and a name has one tier", async () => {
-		const s = open();
-		await s.set("p", "a", "dummy-1234");
-		await s.setTier("p", "a", "persistent");
-		expect(s.list("p")).toEqual([{ name: "a", tier: "persistent" }]);
-		await s.setTier("p", "a", "ephemeral");
-		expect(s.list("p")).toEqual([{ name: "a", tier: "ephemeral" }]);
-		expect(await s.get("p", "a")).toBe("dummy-1234");
+		const s = at(open());
+		await s.set("a", "dummy-1234");
+		await s.setTier("a", "persistent");
+		expect(s.list()).toEqual([{ name: "a", tier: "persistent" }]);
+		await s.setTier("a", "ephemeral");
+		expect(s.list()).toEqual([{ name: "a", tier: "ephemeral" }]);
+		expect(await s.get("a")).toBe("dummy-1234");
 	});
 
 	test("set without tier keeps the current tier", async () => {
-		const s = open();
-		await s.set("p", "a", "dummy-1234", "persistent");
-		expect(await s.set("p", "a", "dummy-5678")).toBe("persistent");
-		expect(open().tierOf("p", "a")).toBe("persistent");
+		const s = at(open());
+		await s.set("a", "dummy-1234", "persistent");
+		expect(await s.set("a", "dummy-5678")).toBe("persistent");
+		expect(at(open()).tierOf("a")).toBe("persistent");
 	});
 
 	test("rename re-encrypts under the new name; onto an existing name throws", async () => {
-		const s = open();
-		await s.set("p", "old", "dummy-1234", "persistent");
-		await s.set("p", "other", "dummy-5678");
-		await expect(s.rename("p", "old", "other")).rejects.toThrow('Secret "other" already exists.');
-		await s.rename("p", "old", "new");
-		const again = open();
-		expect(await again.get("p", "new")).toBe("dummy-1234");
-		await expect(again.get("p", "old")).rejects.toThrow("not found");
+		const s = at(open());
+		await s.set("old", "dummy-1234", "persistent");
+		await s.set("other", "dummy-5678");
+		await expect(s.rename("old", "other")).rejects.toThrow('Secret "other" already exists.');
+		await s.rename("old", "new");
+		const again = at(open());
+		expect(await again.get("new")).toBe("dummy-1234");
+		await expect(again.get("old")).rejects.toThrow("not found");
 	});
 
 	test("a different key is rejected", async () => {
-		await open(7).set("p", "a", "dummy-1234", "persistent");
-		await expect(open(8).get("p", "a")).rejects.toThrow("Vault key mismatch");
+		await at(open(7)).set("a", "dummy-1234", "persistent");
+		await expect(at(open(8)).get("a")).rejects.toThrow("Vault key mismatch");
 	});
 
 	test("an entry copied under another name fails to decrypt (AAD binding)", async () => {
-		await open().set("p", "a", "dummy-1234", "persistent");
+		await at(open()).set("a", "dummy-1234", "persistent");
 		const file = path.join(tmp.dir(), "vault.json");
 		const vault = JSON.parse(fs.readFileSync(file, "utf8"));
-		vault.projects.p.b = vault.projects.p.a;
+		const entries = Object.values(vault.projects)[0] as Record<string, unknown>;
+		entries.b = entries.a;
 		fs.writeFileSync(file, JSON.stringify(vault));
-		await expect(open().get("p", "b")).rejects.toThrow();
+		await expect(at(open()).get("b")).rejects.toThrow();
 	});
 
 	test("knownValues lists ephemeral and decrypted persistent values", async () => {
 		const s = open();
-		await s.set("p", "e", "dummy-eph-1111");
-		await s.set("p", "x", "dummy-per-2222", "persistent");
+		await at(s).set("e", "dummy-eph-1111");
+		await at(s).set("x", "dummy-per-2222", "persistent");
 		expect(s.knownValues().get("dummy-per-2222")).toBe("x");
 		expect(s.knownValues().get("dummy-eph-1111")).toBe("e");
 		s.clearEphemeral();

@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { KeyProvider } from "./keys";
+import { projectKey } from "./project";
 
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const RESERVED_RE = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i;
@@ -38,14 +39,22 @@ export function defaultVaultPath(): string {
 	return path.join(os.homedir(), ".omp", "agent", "pi-secret", "vault.json");
 }
 
+/** One Project's secrets. Every method validates `name` (throws the `validateName` message). */
+export interface ProjectSecrets {
+	/** The Project key (git root or cwd, real path, lowercased on win32). */
+	readonly project: string;
+	list(): SecretInfo[];
+	tierOf(name: string): Tier | undefined;
+	get(name: string): Promise<string>;
+	/** Without `tier`: keep the current tier, else ephemeral. */
+	set(name: string, value: string, tier?: Tier): Promise<Tier>;
+	delete(name: string): void;
+	rename(from: string, to: string): Promise<void>;
+	setTier(name: string, tier: Tier): Promise<void>;
+}
 export interface SecretStore {
-	list(project: string): SecretInfo[];
-	tierOf(project: string, name: string): Tier | undefined;
-	get(project: string, name: string): Promise<string>;
-	set(project: string, name: string, value: string, tier?: Tier): Promise<Tier>;
-	delete(project: string, name: string): void;
-	rename(project: string, from: string, to: string): Promise<void>;
-	setTier(project: string, name: string, tier: Tier): Promise<void>;
+	/** Secrets of the Project containing `cwd` (see `projectKey`). */
+	forProject(cwd: string): ProjectSecrets;
 	/** value → name for all ephemeral secrets and every persistent secret decrypted so far. */
 	knownValues(): Map<string, string>;
 	clearEphemeral(): void;
@@ -227,40 +236,54 @@ export function createStore(opts: { vaultPath: string; keyProvider: KeyProvider 
 		return value;
 	}
 
+	function list(project: string): SecretInfo[] {
+		const out: SecretInfo[] = [
+			...[...(ephemeral.get(project)?.keys() ?? [])].map(name => ({ name, tier: "ephemeral" as const })),
+			...persistentNames(project).map(name => ({ name, tier: "persistent" as const })),
+		];
+		return out.sort((a, b) => a.name.localeCompare(b.name));
+	}
+
+	function remove(project: string, name: string): void {
+		assertName(name);
+		const a = dropEphemeral(project, name);
+		const b = dropPersistent(project, name);
+		if (!a && !b) throw notFound(name);
+	}
+
+	async function rename(project: string, from: string, to: string): Promise<void> {
+		assertName(from);
+		assertName(to);
+		if (tierOf(project, to)) throw new Error(`Secret "${to}" already exists.`);
+		const tier = tierOf(project, from);
+		if (!tier) throw notFound(from);
+		const value = await get(project, from);
+		await set(project, to, value, tier);
+		dropEphemeral(project, from);
+		dropPersistent(project, from);
+	}
+
+	async function setTier(project: string, name: string, tier: Tier): Promise<void> {
+		assertName(name);
+		const current = tierOf(project, name);
+		if (!current) throw notFound(name);
+		if (current === tier) return;
+		await set(project, name, await get(project, name), tier);
+	}
+
 	return {
-		list(project) {
-			const out: SecretInfo[] = [
-				...[...(ephemeral.get(project)?.keys() ?? [])].map(name => ({ name, tier: "ephemeral" as const })),
-				...persistentNames(project).map(name => ({ name, tier: "persistent" as const })),
-			];
-			return out.sort((a, b) => a.name.localeCompare(b.name));
-		},
-		tierOf,
-		get,
-		set,
-		delete(project, name) {
-			assertName(name);
-			const a = dropEphemeral(project, name);
-			const b = dropPersistent(project, name);
-			if (!a && !b) throw notFound(name);
-		},
-		async rename(project, from, to) {
-			assertName(from);
-			assertName(to);
-			if (tierOf(project, to)) throw new Error(`Secret "${to}" already exists.`);
-			const tier = tierOf(project, from);
-			if (!tier) throw notFound(from);
-			const value = await get(project, from);
-			await set(project, to, value, tier);
-			dropEphemeral(project, from);
-			dropPersistent(project, from);
-		},
-		async setTier(project, name, tier) {
-			assertName(name);
-			const current = tierOf(project, name);
-			if (!current) throw notFound(name);
-			if (current === tier) return;
-			await set(project, name, await get(project, name), tier);
+		forProject(cwd) {
+			const project = projectKey(cwd);
+			return {
+				project,
+				list: () => list(project),
+				tierOf: n => tierOf(project, n),
+				get: n => get(project, n),
+				set: (n, v, t) => set(project, n, v, t),
+				delete: n => remove(project, n),
+				rename: (f, t) => rename(project, f, t),
+				setTier: (n, t) => setTier(project, n, t),
+			};
 		},
 		knownValues() {
 			const out = new Map<string, string>();

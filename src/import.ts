@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { type ProjectSecrets, secretLength, type Tier, validateName } from "./store";
 
 export type ImportSource =
 	| { type: "command"; command: string; cwd?: string }
@@ -108,4 +109,43 @@ export function extractValue(raw: string, extract: Extract | undefined, trim: bo
 	if (trim) value = value.trim();
 	if (value === "") throw new Error("Imported value is empty.");
 	return value;
+}
+
+/** Approval tier for an `import_secret` call: commands run code and secret_headers send stored secrets to a model-chosen URL, so both need exec, like bash. */
+export function importApproval(args: unknown): "write" | { tier: "exec"; reason: string } {
+	const source = (args as { source?: { type?: string; secret_headers?: Record<string, unknown> } } | undefined)?.source;
+	if (source?.type === "command") return { tier: "exec", reason: "runs a shell command" };
+	if (source?.type === "http" && source.secret_headers && Object.keys(source.secret_headers).length > 0) {
+		return { tier: "exec", reason: "sends stored secrets to a URL" };
+	}
+	return "write";
+}
+
+export interface ImportRequest {
+	name: string;
+	/** undefined: keep the current tier, else ephemeral. */
+	persistent?: boolean;
+	source: ImportSource;
+	extract?: Extract;
+	/** Default true. */
+	trim?: boolean;
+}
+
+/** Validate the name, read the source, extract, store. Returns tier and length only, never the value. */
+export async function importSecret(
+	secrets: ProjectSecrets,
+	req: ImportRequest,
+	o: { cwd: string; signal?: AbortSignal; shell: ShellSpec },
+): Promise<{ tier: Tier; length: number }> {
+	// Before reading: an invalid name must never run a command or make a request.
+	const invalid = validateName(req.name);
+	if (invalid) throw new Error(invalid);
+	const raw = await readSource(req.source, { ...o, resolveSecret: n => secrets.get(n) });
+	const value = extractValue(raw, req.extract, req.trim ?? true);
+	const tier = await secrets.set(
+		req.name,
+		value,
+		req.persistent === undefined ? undefined : req.persistent ? "persistent" : "ephemeral",
+	);
+	return { tier, length: secretLength(value) };
 }
