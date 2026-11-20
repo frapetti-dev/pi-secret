@@ -359,6 +359,14 @@ export default function piSecret(pi: ExtensionAPI) {
 		},
 	});
 
+	// pi-verdict (if installed) asks at every session start; listed tools then skip its classifier. bash and import_secret run commands, so they stay gated.
+	pi.events.on("pi-verdict:collect", () =>
+		pi.events.emit("pi-verdict:contribute", {
+			source: "pi-secret",
+			tools: ["ask_secret", "list_secrets", "secret_length", "secret_size", "secret_hash", "delete_secret", "show_secrets"],
+		}),
+	);
+
 	// What is stored and shown.
 	pi.on("tool_result", e => {
 		const redact = createRedactor(store.knownValues());

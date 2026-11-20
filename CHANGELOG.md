@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `/secrets` manager command (native Tern picker with ANSI twin).
 - `bash` is re-registered with `secrets` (env) and `secret_files` (temp file) bindings.
 - Redaction of secret values (`[secret:<name>]`) in tool results and in everything sent to the model.
+- pi-verdict integration: on `pi-verdict:collect`, contribute `ask_secret`, `list_secrets`, `secret_length`, `secret_size`, `secret_hash`, `delete_secret` and `show_secrets` as always allowed, so they skip the classifier without manual `tools` config. `bash` and `import_secret` stay gated.
 
 ### Changed
 
