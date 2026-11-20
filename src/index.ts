@@ -250,7 +250,15 @@ export default function piSecret(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "import_secret",
 		label: "Import Secret",
-		approval: "write",
+		// Commands run arbitrary code and secret_headers send stored secrets to a model-chosen URL: both need the exec tier, like bash.
+		approval: (args: unknown) => {
+			const source = (args as { source?: { type?: string; secret_headers?: Record<string, unknown> } } | undefined)?.source;
+			if (source?.type === "command") return { tier: "exec", reason: "runs a shell command" };
+			if (source?.type === "http" && source.secret_headers && Object.keys(source.secret_headers).length > 0) {
+				return { tier: "exec", reason: "sends stored secrets to a URL" };
+			}
+			return "write";
+		},
 		description: [
 			"Create a secret from an automatic source without its value passing through you: a command's stdout, a file, an HTTP response or an environment variable.",
 			"Optional `extract` pulls a value out of the source (`json`: dot path, numeric segments index arrays; `regex`: group 1 or the whole match); the result is trimmed unless `trim` is false.",

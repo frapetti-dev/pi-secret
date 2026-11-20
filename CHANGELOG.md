@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The temp-file store, `get_secret_path` and the `read`/`grep` `tool_call` guard.
 
+### Fixed
+
+- `import_secret` needs `exec` approval (like `bash`) for `command` sources and for `http` sources with `secret_headers`; other sources stay at `write`.
+
 ## [0.1.0] - 2026-10-02
 
 ### Added
