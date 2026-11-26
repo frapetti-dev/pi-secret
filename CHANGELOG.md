@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-26
+
 ### Changed
 
 - **BREAKING**: requires omp 19.2.1+; the secrets manager, reveal dialog and secret prompt render with omp's new pi-tui nodes.
