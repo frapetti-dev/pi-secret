@@ -1,41 +1,8 @@
-import type { ExtensionContext, Theme } from "@oh-my-pi/pi-coding-agent";
-import { type DescribeContext, type FormFieldTheme, type NativeNode, TextFormField } from "@oh-my-pi/pi-tui";
-import { Memo, n, prose } from "./nodes";
+import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import type { JSXNode, KeyEvent } from "@oh-my-pi/pi-tui";
 import type { ProjectSecrets, Tier } from "../store";
-
-/**
- * Masked single-field prompt: the typed value is rendered as bullets and never echoed.
- *
- * Only the root `@oh-my-pi/pi-tui` export is used and styling comes from the host's `theme`
- * argument: the extension loads its own copy of pi-tui, whose global theme/chrome singletons
- * are never initialised (importing `chrome/*` fails with `undefined is not an object (theme.fg)`).
- */
-export function createSecretPrompt(
-	theme: Theme,
-	title: string,
-	description: string | undefined,
-	onSubmit: (value: string) => void,
-	onCancel: () => void,
-): TextFormField {
-	const formTheme: FormFieldTheme = {
-		label: text => theme.bold(theme.fg("accent", text)),
-		description: text => theme.fg("muted", text),
-		error: text => theme.fg("error", text),
-		hint: text => theme.fg("dim", text),
-	};
-	return new TextFormField({
-		theme: formTheme,
-		label: title,
-		description,
-		secret: true,
-		empty: "reject",
-		emptyError: "A secret is required.",
-		hint: "Enter submit  Esc cancel",
-		leadingSpace: true,
-		onSubmit,
-		onCancel,
-	});
-}
+import { LineInput } from "./line-input";
+import { heading, mount, n, prose, txt } from "./nodes";
 
 export interface AskEntry {
 	name: string;
@@ -58,68 +25,61 @@ async function askSecrets(
 	const settle = () => ({ entered, cancelled: entries.slice(entered.length).map(e => e.name) });
 	if (signal?.aborted) return settle();
 	try {
-		await ctx.ui.custom<void>((tui, theme, _kb, done) => {
-			const flags = entries.map(e => e.persistent);
-			const memo = new Memo();
-			let index = 0;
-			let version = 0;
-			let finished = false;
+		await ctx.ui.custom<void>((_ui, _theme, _kb, done) =>
+			mount(refresh => {
+				const flags = entries.map(e => e.persistent);
+				let input = new LineInput("", { masked: true });
+				let error: string | undefined;
+				let index = 0;
+				let finished = false;
 
-			const finish = () => {
-				if (finished) return;
-				finished = true;
-				signal?.removeEventListener("abort", finish);
-				done();
-			};
-			signal?.addEventListener("abort", finish, { once: true });
+				const finish = () => {
+					if (finished) return;
+					finished = true;
+					signal?.removeEventListener("abort", finish);
+					done();
+				};
+				signal?.addEventListener("abort", finish, { once: true });
 
-			const storageLine = () =>
-				flags[index]
-					? "Storage: persistent (Tab: make ephemeral)"
-					: "Storage: ephemeral (Tab: make persistent)";
+				const storageLine = () =>
+					flags[index]
+						? "Storage: persistent (Tab: make ephemeral)"
+						: "Storage: ephemeral (Tab: make persistent)";
 
-			let field = makeField();
-
-			function makeField() {
-				const entry = entries[index]!;
-				const f = createSecretPrompt(
-					theme,
-					`Secret ${index + 1}/${entries.length}: ${entry.name}`,
-					entry.prompt,
-					value => {
-						entered.push({ name: entry.name, value, persistent: flags[index]! });
-						if (++index >= entries.length) return finish();
-						field = makeField();
-						version++;
-						tui.requestRender();
+				return {
+					describe(): JSXNode {
+						const entry = entries[Math.min(index, entries.length - 1)]!;
+						return n("col", { gap: "sm" }, [
+							heading(`Secret ${index + 1}/${entries.length}: ${entry.name}`),
+							...(entry.prompt ? [prose(entry.prompt)] : []),
+							input.node({ key: "value", focused: true }),
+							...(error ? [txt([{ t: error, s: "error" }])] : []),
+							prose(storageLine()),
+							txt([{ t: "Enter submit · Esc cancel · Tab persistence", s: "muted" }]),
+						]);
 					},
-					finish,
-				);
-				f.focused = true;
-				return f;
-			}
-
-			return {
-				describe(cx: DescribeContext): NativeNode {
-					return memo.get([version, index, flags[index], cx.dark], () =>
-						n("col", { gap: "sm" }, [field, prose(storageLine())]),
-					);
-				},
-				handleInput(data: string): void {
-					if (data === "\t") {
-						flags[index] = !flags[index];
-						version++;
-					} else field.handleInput(data);
-					tui.requestRender();
-				},
-				render(width: number): readonly string[] {
-					return [...field.render(width), theme.fg("muted", storageLine())];
-				},
-				invalidate(): void {
-					field.invalidate();
-				},
-			};
-		});
+					handleKey(key: KeyEvent): void {
+						if (finished) return;
+						if (key.id === "tab") flags[index] = !flags[index];
+						else if (key.id === "enter") {
+							if (!input.value) error = "A secret is required.";
+							else {
+								entered.push({ name: entries[index]!.name, value: input.value, persistent: flags[index]! });
+								input = new LineInput("", { masked: true });
+								error = undefined;
+								if (++index >= entries.length) return finish();
+							}
+						} else if (key.id === "escape") return finish();
+						else if (input.handleKey(key)) error = undefined;
+						refresh();
+					},
+					handlePaste(text: string): void {
+						input.paste(text);
+						refresh();
+					},
+				};
+			}),
+		);
 	} catch {
 		// Dialog rejection/abort: everything not yet entered counts as cancelled.
 	}
