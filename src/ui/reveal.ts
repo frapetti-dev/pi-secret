@@ -1,7 +1,7 @@
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import type { DescribeContext, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui";
+import type { JSXNode, KeyEvent, UiEvent } from "@oh-my-pi/pi-tui";
 import type { Tier } from "../store";
-import { bar, button, fit, framed, heading, isClose, isKey, Memo, n, prose, txt } from "./nodes";
+import { bar, button, framed, heading, mount, n, prose, txt } from "./nodes";
 
 export interface RevealItem {
 	name: string;
@@ -42,104 +42,86 @@ async function copyText(text: string): Promise<void> {
 
 /** Blocking overlay showing secret values to the user only. Resolves when the user closes it. */
 export async function showSecrets(ctx: ExtensionContext, items: RevealItem[]): Promise<void> {
-	await ctx.ui.custom<void>(
-		(tui, _theme, _kb, done) => {
-			const revealed = new Set<string>();
-			let cursor = 0;
-			let status = "";
-			let version = 0;
-			let closed = false;
-			const memo = new Memo();
+	const revealed = new Set<string>();
+	try {
+		await ctx.ui.custom<void>(
+			(_ui, _theme, _kb, done) =>
+				mount(refresh => {
+					let cursor = 0;
+					let status = "";
+					let closed = false;
 
-			const bump = () => {
-				version++;
-				tui.requestRender();
-			};
-			const finish = () => {
-				if (closed) return;
-				closed = true;
-				revealed.clear();
-				done();
-			};
-			const toggle = (name: string) => {
-				if (!revealed.delete(name)) revealed.add(name);
-			};
-			const copy = async (name: string) => {
-				const item = items.find(i => i.name === name);
-				if (!item) return;
-				try {
-					await copyText(item.value);
-					status = `Copied ${name}`;
-				} catch (err) {
-					status = `Copy failed: ${err instanceof Error ? err.message : String(err)}`;
-				}
-				if (!closed) bump();
-			};
+					const finish = () => {
+						if (closed) return;
+						closed = true;
+						revealed.clear();
+						done();
+					};
+					const toggle = (name: string) => {
+						if (!revealed.delete(name)) revealed.add(name);
+					};
+					const copy = async (name: string) => {
+						const item = items.find(i => i.name === name);
+						if (!item) return;
+						try {
+							await copyText(item.value);
+							status = `Copied ${name}`;
+						} catch (err) {
+							status = `Copy failed: ${err instanceof Error ? err.message : String(err)}`;
+						}
+						if (!closed) refresh();
+					};
 
-			return {
-				nativeOverlay: { role: "omp.overlay.pi-secret", head: "Secrets" },
-				describe(cx: DescribeContext): NativeNode {
-					return memo.get([version, cx.dark], () =>
-						framed(
-							[
-								heading("Secrets (visible to you only)"),
-								...items.map(i => {
-									const shown = revealed.has(i.name);
-									return n(
-										"col",
-										{ gap: "xs" },
-										[
-											txt(`${i.name} (${i.tier})`, { mono: true } as never),
-											txt(shown ? i.value : BULLETS, { mono: true } as never),
-											bar(
-												[button(shown ? "Hide" : "Show", `toggle:${i.name}`), button("Copy", `copy:${i.name}`)],
-												`actions:${i.name}`,
-											),
-										],
-										`row:${i.name}`,
-									);
-								}),
-								bar([prose(status), null, button("Close", "close", "escape")], "footer"),
-							],
-							"md",
-						),
-					);
-				},
-				handleNativeEvent(e: NativeUiEvent): void {
-					if (e.type !== "action") return;
-					if (e.act === "close") return finish();
-					const at = e.act.indexOf(":");
-					const act = at < 0 ? e.act : e.act.slice(0, at);
-					const name = at < 0 ? "" : e.act.slice(at + 1);
-					if (act === "toggle") toggle(name);
-					else if (act === "copy") void copy(name);
-					bump();
-				},
-				handleInput(data: string): void {
-					const current = items[cursor];
-					if (isClose(data)) return finish();
-					if (isKey(data, "up")) cursor = Math.max(0, cursor - 1);
-					else if (isKey(data, "down")) cursor = Math.min(items.length - 1, cursor + 1);
-					else if (current && (isKey(data, "enter") || data === " ")) toggle(current.name);
-					else if (current && data === "c") void copy(current.name);
-					bump();
-				},
-				render(width: number): readonly string[] {
-					return [
-						...items.map(
-							(i, idx) =>
-								`${idx === cursor ? ">" : " "} ${i.name} (${i.tier})  ${revealed.has(i.name) ? i.value : BULLETS}`,
-						),
-						status,
-						"↑↓ select · enter show/hide · c copy · esc close",
-					].map(l => fit(l, width));
-				},
-				invalidate(): void {},
-				dispose(): void {
-					revealed.clear();
-				},
-			};
-		},
-		{ overlay: true, overlayOptions: { width: "80%" } },
-	);
+					return {
+						describe(): JSXNode {
+							return framed(
+								[
+									heading("Secrets (visible to you only)"),
+									...items.map(i => {
+										const shown = revealed.has(i.name);
+										return n(
+											"col",
+											{ gap: "xs" },
+											[
+												txt(`${i.name} (${i.tier})`, { mono: true } as never),
+												txt(shown ? i.value : BULLETS, { mono: true } as never),
+												bar(
+													[button(shown ? "Hide" : "Show", `toggle:${i.name}`), button("Copy", `copy:${i.name}`)],
+													`actions:${i.name}`,
+												),
+											],
+											`row:${i.name}`,
+										);
+									}),
+									bar([prose(status), null, button("Close", "close", "escape")], "footer"),
+								],
+								"md",
+							);
+						},
+						handleEvent(e: UiEvent): void {
+							if (e.type !== "action") return;
+							if (e.act === "close") return finish();
+							const at = e.act.indexOf(":");
+							const act = at < 0 ? e.act : e.act.slice(0, at);
+							const name = at < 0 ? "" : e.act.slice(at + 1);
+							if (act === "toggle") toggle(name);
+							else if (act === "copy") void copy(name);
+							refresh();
+						},
+						handleKey(key: KeyEvent): void {
+							const current = items[cursor];
+							if (key.id === "escape" || key.id === "q") return finish();
+							if (key.id === "up") cursor = Math.max(0, cursor - 1);
+							else if (key.id === "down") cursor = Math.min(items.length - 1, cursor + 1);
+							else if (current && (key.id === "enter" || key.id === "space")) toggle(current.name);
+							else if (current && key.id === "c") void copy(current.name);
+							refresh();
+						},
+					};
+				}),
+			{ overlay: true },
+		);
+	} finally {
+		revealed.clear();
+	}
 }

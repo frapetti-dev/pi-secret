@@ -1,7 +1,7 @@
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import type { DescribeContext, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui";
+import type { JSXNode, KeyEvent, UiEvent } from "@oh-my-pi/pi-tui";
 import type { SecretInfo } from "../store";
-import { fit, isKey, Memo, n } from "./nodes";
+import { mount, n } from "./nodes";
 
 export type ManagerAct = "show" | "add" | "edit" | "rename" | "tier" | "delete" | "close";
 export interface ManagerResult {
@@ -17,7 +17,7 @@ const KEYS: [string, ManagerAct][] = [
 	["delete", "delete"],
 ];
 
-/** Native `picker` sheet (ANSI twin included) listing one project's secrets with per-secret actions. */
+/** Native `picker` sheet listing one project's secrets with per-secret actions. */
 export async function pickSecret(
 	ctx: ExtensionContext,
 	project: string,
@@ -25,32 +25,25 @@ export async function pickSecret(
 	selected?: string,
 ): Promise<ManagerResult | undefined> {
 	return ctx.ui.custom<ManagerResult | undefined>(
-		(tui, _theme, _kb, done) => {
-			let current = secrets.find(s => s.name === selected)?.name ?? secrets[0]?.name;
-			let version = 0;
-			const memo = new Memo();
-			const none = secrets.length === 0;
+		(_ui, _theme, _kb, done) =>
+			mount(refresh => {
+				let current = secrets.find(s => s.name === selected)?.name ?? secrets[0]?.name;
+				const none = secrets.length === 0;
 
-			const bump = () => {
-				version++;
-				tui.requestRender();
-			};
-			const move = (d: number) => {
-				if (none) return;
-				const i = Math.max(0, secrets.findIndex(s => s.name === current));
-				current = secrets[Math.min(secrets.length - 1, Math.max(0, i + d))]!.name;
-			};
-			const pick = (act: ManagerAct) => {
-				if (act === "close") return done({ act });
-				if (act === "add") return done({ act });
-				if (current !== undefined) done({ act, name: current });
-			};
+				const move = (d: number) => {
+					if (none) return;
+					const i = Math.max(0, secrets.findIndex(s => s.name === current));
+					current = secrets[Math.min(secrets.length - 1, Math.max(0, i + d))]!.name;
+				};
+				const pick = (act: ManagerAct) => {
+					if (act === "close") return done({ act });
+					if (act === "add") return done({ act });
+					if (current !== undefined) done({ act, name: current });
+				};
 
-			return {
-				nativeSheet: (cx: DescribeContext) => cx.supports("picker"),
-				describe(_cx: DescribeContext): NativeNode {
-					return memo.get([version], () =>
-						n("picker", {
+				return {
+					describe(): JSXNode {
+						return n("picker", {
 							title: "Secrets",
 							subtitle: project,
 							noun: "secret",
@@ -68,40 +61,28 @@ export async function pickSecret(
 								{ id: "delete", label: "Delete", keys: ["delete"], danger: true, disabled: none },
 								{ id: "close", label: "Close", keys: ["escape"], end: true },
 							],
-						} as never),
-					);
-				},
-				handleNativeEvent(e: NativeUiEvent): void {
-					if (e.type === "select") current = e.item;
-					else if (e.type === "activate") return done({ act: "show", name: e.item });
-					else if (e.type === "action") {
-						current = current ?? undefined;
-						return pick(e.act as ManagerAct);
-					}
-					bump();
-				},
-				handleInput(data: string): void {
-					if (isKey(data, "escape")) return done(undefined);
-					if (isKey(data, "up")) move(-1);
-					else if (isKey(data, "down")) move(1);
-					else if (isKey(data, "enter")) return pick("show");
-					else {
-						const hit = KEYS.find(([key]) => isKey(data, key));
-						if (hit) return pick(hit[1]);
-						return;
-					}
-					bump();
-				},
-				render(width: number): readonly string[] {
-					return [
-						`Secrets · ${project}`,
-						...(none ? ["  (none)"] : secrets.map(s => `${s.name === current ? ">" : " "} ${s.name}  (${s.tier})`)),
-						"↑↓ select · enter show · ctrl+n add · ctrl+e edit · ctrl+r rename · ctrl+y persistence · del delete · esc close",
-					].map(l => fit(l, width));
-				},
-				invalidate(): void {},
-			};
-		},
+						} as never);
+					},
+					handleEvent(e: UiEvent): void {
+						if (e.type === "select") current = e.item;
+						else if (e.type === "activate") return done({ act: "show", name: e.item });
+						else if (e.type === "action") return pick(e.act as ManagerAct);
+						refresh();
+					},
+					handleKey(key: KeyEvent): void {
+						if (key.id === "escape") return done(undefined);
+						if (key.id === "up") move(-1);
+						else if (key.id === "down") move(1);
+						else if (key.id === "enter") return pick("show");
+						else {
+							const hit = KEYS.find(([id]) => key.id === id);
+							if (hit) return pick(hit[1]);
+							return;
+						}
+						refresh();
+					},
+				};
+			}),
 		{ overlay: true },
 	);
 }
